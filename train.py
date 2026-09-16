@@ -77,6 +77,8 @@ def parameter_groups(model):
 
 def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, device):
     model.train()
+    correct = 0
+    sample_count = 0
     for images, texts, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
@@ -89,9 +91,13 @@ def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, dev
             image_logits, image_features, text_logits, text_features, labels
         )
         optimizer.set_modal_betas(modal_betas)
-        loss = F.cross_entropy(fuse_logits(image_logits, text_logits), labels)
+        fused_logits = fuse_logits(image_logits, text_logits)
+        loss = F.cross_entropy(fused_logits, labels)
         loss.backward()
         optimizer.step()
+        correct += (fused_logits.argmax(dim=1) == labels).sum().item()
+        sample_count += labels.shape[0]
+    return correct / sample_count
 
 
 @torch.no_grad()
@@ -142,9 +148,9 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
 
     checkpoint = output_dir / f"seed_{seed}_best.pt"
     best_dev_acc = -float("inf")
-    epoch_test_acc = []
+    epoch_train_acc = []
     for epoch in range(config["epochs"]):
-        train_epoch(
+        train_acc = train_epoch(
             model,
             loaders["train"],
             tokenizer,
@@ -160,11 +166,8 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
             best_dev_acc = dev_acc
             torch.save(model.state_dict(), checkpoint)
 
-        test_acc = evaluate_accuracy(
-            model, loaders["test"], tokenizer, config["max_tokens"], device
-        )
-        epoch_result = {"epoch": epoch + 1, "test_acc": test_acc}
-        epoch_test_acc.append(epoch_result)
+        epoch_result = {"epoch": epoch + 1, "train_acc": train_acc}
+        epoch_train_acc.append(epoch_result)
         print(json.dumps({"seed": seed, **epoch_result}, sort_keys=True))
 
     model.load_state_dict(torch.load(checkpoint, map_location=device))
@@ -174,11 +177,12 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
     result = {
         "seed": seed,
         "test_acc": test_acc,
-        "epoch_test_acc": epoch_test_acc,
+        "epoch_train_acc": epoch_train_acc,
     }
     (output_dir / f"seed_{seed}.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
+    print(json.dumps({"seed": seed, "test_acc": test_acc}, sort_keys=True))
     return result
 
 
