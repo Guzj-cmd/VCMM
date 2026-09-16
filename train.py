@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -78,8 +77,6 @@ def parameter_groups(model):
 
 def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, device):
     model.train()
-    loss_sum = 0.0
-    sample_count = 0
     for images, texts, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
@@ -95,13 +92,10 @@ def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, dev
         loss = F.cross_entropy(fuse_logits(image_logits, text_logits), labels)
         loss.backward()
         optimizer.step()
-        loss_sum += loss.item() * labels.shape[0]
-        sample_count += labels.shape[0]
-    return loss_sum / sample_count
 
 
 @torch.no_grad()
-def evaluate(model, loader, tokenizer, max_tokens, device):
+def evaluate_accuracy(model, loader, tokenizer, max_tokens, device):
     model.eval()
     predictions = []
     targets = []
@@ -113,10 +107,7 @@ def evaluate(model, loader, tokenizer, max_tokens, device):
         targets.append(labels)
     predictions = torch.cat(predictions).numpy()
     targets = torch.cat(targets).numpy()
-    return {
-        "accuracy": float(np.mean(predictions == targets)),
-        "macro_f1": float(f1_score(targets, predictions, average="macro")),
-    }
+    return float(np.mean(predictions == targets))
 
 
 def run_seed(seed, config, args, datasets, tokenizer, output_dir):
@@ -149,11 +140,11 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
         gain_max=config["gain_max"],
     )
 
-    checkpoint = output_dir / f"seed_{seed}_best_dev.pt"
-    best_dev = None
-    history = []
+    checkpoint = output_dir / f"seed_{seed}_best.pt"
+    best_dev_acc = -float("inf")
+    epoch_test_acc = []
     for epoch in range(config["epochs"]):
-        train_loss = train_epoch(
+        train_epoch(
             model,
             loaders["train"],
             tokenizer,
@@ -162,27 +153,28 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
             config["max_tokens"],
             device,
         )
-        dev = evaluate(
+        dev_acc = evaluate_accuracy(
             model, loaders["dev"], tokenizer, config["max_tokens"], device
         )
-        record = {"epoch": epoch + 1, "train_loss": train_loss, "dev": dev}
-        history.append(record)
-        print(json.dumps({"seed": seed, **record}, sort_keys=True))
-        key = (dev["accuracy"], dev["macro_f1"])
-        if best_dev is None or key > best_dev[0]:
-            best_dev = (key, epoch + 1)
+        if dev_acc > best_dev_acc:
+            best_dev_acc = dev_acc
             torch.save(model.state_dict(), checkpoint)
 
+        test_acc = evaluate_accuracy(
+            model, loaders["test"], tokenizer, config["max_tokens"], device
+        )
+        epoch_result = {"epoch": epoch + 1, "test_acc": test_acc}
+        epoch_test_acc.append(epoch_result)
+        print(json.dumps({"seed": seed, **epoch_result}, sort_keys=True))
+
     model.load_state_dict(torch.load(checkpoint, map_location=device))
-    test = evaluate(
+    test_acc = evaluate_accuracy(
         model, loaders["test"], tokenizer, config["max_tokens"], device
     )
     result = {
         "seed": seed,
-        "selected_epoch": best_dev[1],
-        "dev": {"accuracy": best_dev[0][0], "macro_f1": best_dev[0][1]},
-        "test": test,
-        "history": history,
+        "test_acc": test_acc,
+        "epoch_test_acc": epoch_test_acc,
     }
     (output_dir / f"seed_{seed}.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
@@ -206,20 +198,16 @@ def main():
         run_seed(seed, config, args, datasets, tokenizer, output_dir)
         for seed in config["seeds"]
     ]
-    accuracy = np.array([result["test"]["accuracy"] for result in results])
-    macro_f1 = np.array([result["test"]["macro_f1"] for result in results])
+    test_acc = np.array([result["test_acc"] for result in results])
     summary = {
         "seeds": config["seeds"],
-        "accuracy_mean": float(accuracy.mean()),
-        "accuracy_std": float(accuracy.std(ddof=1)),
-        "macro_f1_mean": float(macro_f1.mean()),
-        "macro_f1_std": float(macro_f1.std(ddof=1)),
+        "test_acc_mean": float(test_acc.mean()),
+        "test_acc_std": float(test_acc.std(ddof=1)),
         "per_seed": results,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
-    print(json.dumps({key: value for key, value in summary.items() if key != "per_seed"}))
 
 
 if __name__ == "__main__":

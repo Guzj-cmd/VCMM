@@ -9,6 +9,17 @@ Instead of assigning the same momentum to every modality, it estimates
 modality-specific minibatch noise and temporal drift online, then adapts each
 modality's momentum with a centered Kalman-inspired controller.
 
+<p align="center">
+  <a href="assets/vcmmpipeline.pdf">
+    <img src="assets/vcmmpipeline.png" width="100%" alt="VCMM pipeline">
+  </a>
+</p>
+
+<p align="center"><em>
+VCMM estimates online modal dynamics, centers modality-specific memory gains,
+and applies exact bias correction during the base optimizer update.
+</em></p>
+
 ## Highlights
 
 - **Adaptive modal memory:** different modalities receive different,
@@ -32,6 +43,9 @@ training pipelines.
 
 ```text
 .
+|-- assets/
+|   |-- vcmmpipeline.png      # framework preview for GitHub
+|   `-- vcmmpipeline.pdf      # vector-quality framework figure
 |-- data/
 |   `-- config.json           # experiment configuration
 |-- dataset/
@@ -96,10 +110,11 @@ For details not fixed in the manuscript, this example uses equal logit fusion,
 The final incomplete training minibatch is dropped so that the two interleaved
 probe halves have equal size.
 
-Checkpoints are selected using only development-set accuracy and Macro-F1. The
-test set is evaluated exactly once for each seed after model selection. The
-script writes one JSON record per seed and a final `summary.json` containing
-the mean and sample standard deviation.
+Checkpoints are selected internally using development-set accuracy; development
+metrics are not reported. During training, the console prints only `test_acc`
+for every epoch. Result files contain the epoch-level test accuracies and the
+test accuracy of the internally selected checkpoint; `summary.json` contains
+`test_acc_mean` and its sample standard deviation across seeds.
 
 By default, Hugging Face downloads `bert-base-uncased` and torchvision loads
 ImageNet-1K ResNet-50 weights. A torchvision-compatible checkpoint can be
