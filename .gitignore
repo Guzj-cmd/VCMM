@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+data/*
+!data/config.json
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.log
+*.jsonl
+.idea/
+.vscode/
