@@ -2,7 +2,7 @@
 
 Official PyTorch implementation of **Variance-Calibrated Modal Momentum
 (VCMM)**, proposed in *Adaptive Gradient Memory for Balanced Multimodal
-Learning* (ICASSP 2026).
+Learning* (ICASSP 2027).
 
 VCMM revisits modality imbalance from the perspective of gradient memory.
 Instead of assigning the same momentum to every modality, it estimates
