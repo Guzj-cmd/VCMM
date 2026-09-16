@@ -105,17 +105,6 @@ The default configuration follows the paper setting: Adam learning rate
 EMA `0.95`, adaptation strength `1`, drift floor `1e-4`, and gain range
 `[0.01, 0.30]`.
 
-For details not fixed in the manuscript, this example uses equal logit fusion,
-50 epochs, constant learning rate, Adam beta2 `0.999`, and seeds `42`--`46`.
-The final incomplete training minibatch is dropped so that the two interleaved
-probe halves have equal size.
-
-Checkpoints are selected internally using development-set accuracy; development
-metrics are not reported. During training, the console prints only `test_acc`
-for every epoch. Result files contain the epoch-level test accuracies and the
-test accuracy of the internally selected checkpoint; `summary.json` contains
-`test_acc_mean` and its sample standard deviation across seeds.
-
 By default, Hugging Face downloads `bert-base-uncased` and torchvision loads
 ImageNet-1K ResNet-50 weights. A torchvision-compatible checkpoint can be
 provided with `--resnet-checkpoint`.
