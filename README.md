@@ -102,8 +102,8 @@ python train.py \
 
 The default configuration follows the paper setting: Adam learning rate
 `2e-5`, weight decay `2e-4`, batch size `32`, base momentum `0.9`, statistics
-EMA `0.95`, adaptation strength `1`, drift floor `1e-4`, and gain range
-`[0.01, 0.30]`.
+EMA `0.95`, adaptation strength `1`, a 100-step controller warm-up, drift
+floor `1e-4`, and gain range `[0.01, 0.30]`.
 
 By default, Hugging Face downloads `bert-base-uncased` and torchvision loads
 ImageNet-1K ResNet-50 weights. A torchvision-compatible checkpoint can be

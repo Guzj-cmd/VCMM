@@ -11,10 +11,14 @@
   "adam_beta1": 0.9,
   "adam_beta2": 0.999,
   "adam_epsilon": 1e-8,
+  "lr_scheduler_step_size": 20,
+  "lr_scheduler_gamma": 0.1,
   "statistics_ema": 0.95,
   "adaptation_strength": 1.0,
+  "warmup_steps": 100,
   "drift_floor": 0.0001,
   "gain_min": 0.01,
   "gain_max": 0.30,
+  "fusion_grid_points": 101,
   "seeds": [42, 43, 44, 45, 46]
 }

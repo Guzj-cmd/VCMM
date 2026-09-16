@@ -27,6 +27,7 @@ class VCMMController:
         base_beta=0.9,
         statistics_ema=0.95,
         adaptation_strength=1.0,
+        warmup_steps=100,
         drift_floor=1e-4,
         gain_min=0.01,
         gain_max=0.30,
@@ -36,10 +37,12 @@ class VCMMController:
         self.base_gain = 1.0 - self.base_beta
         self.statistics_ema = float(statistics_ema)
         self.adaptation_strength = float(adaptation_strength)
+        self.warmup_steps = int(warmup_steps)
         self.drift_floor = float(drift_floor)
         self.gain_min = float(gain_min)
         self.gain_max = float(gain_max)
         self.epsilon = float(epsilon)
+        self.steps = 0
         self.state = {}
 
     @staticmethod
@@ -117,9 +120,11 @@ class VCMMController:
                 modality, probe, r_instant, signal
             )
 
-        # A temporal difference does not exist at t=1, so the base momentum is
-        # used for that initialization step. No additional warm-up is applied.
-        if not initialized:
+        self.steps += 1
+
+        # Statistics are collected during warm-up, but parameter updates retain
+        # the base momentum until the controller has a stable history.
+        if not initialized or self.steps <= self.warmup_steps:
             return {"image": self.base_beta, "text": self.base_beta}
 
         raw_logits = {}

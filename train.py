@@ -101,19 +101,43 @@ def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, dev
 
 
 @torch.no_grad()
-def evaluate_accuracy(model, loader, tokenizer, max_tokens, device):
+def collect_logits(model, loader, tokenizer, max_tokens, device):
     model.eval()
-    predictions = []
+    image_predictions = []
+    text_predictions = []
     targets = []
     for images, texts, labels in loader:
         images = images.to(device, non_blocking=True)
         text_inputs = tokenize(tokenizer, texts, max_tokens, device)
         image_logits, text_logits, _, _ = model(images, text_inputs)
-        predictions.append(fuse_logits(image_logits, text_logits).argmax(dim=1).cpu())
+        image_predictions.append(image_logits.cpu())
+        text_predictions.append(text_logits.cpu())
         targets.append(labels)
-    predictions = torch.cat(predictions).numpy()
-    targets = torch.cat(targets).numpy()
-    return float(np.mean(predictions == targets))
+    return (
+        torch.cat(image_predictions),
+        torch.cat(text_predictions),
+        torch.cat(targets),
+    )
+
+
+def fused_accuracy(image_logits, text_logits, targets, image_weight):
+    logits = image_weight * image_logits + (1.0 - image_weight) * text_logits
+    return float((logits.argmax(dim=1) == targets).float().mean())
+
+
+def select_fusion_weight(image_logits, text_logits, targets, points):
+    if points < 2:
+        raise ValueError("fusion_grid_points must be at least 2")
+    best = None
+    for index in range(points):
+        image_weight = index / float(points - 1)
+        accuracy = fused_accuracy(
+            image_logits, text_logits, targets, image_weight
+        )
+        key = (accuracy, -abs(image_weight - 0.5), -index)
+        if best is None or key > best[0]:
+            best = (key, image_weight)
+    return best[0][0], best[1]
 
 
 def run_seed(seed, config, args, datasets, tokenizer, output_dir):
@@ -141,13 +165,19 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
         base_beta=config["adam_beta1"],
         statistics_ema=config["statistics_ema"],
         adaptation_strength=config["adaptation_strength"],
+        warmup_steps=config["warmup_steps"],
         drift_floor=config["drift_floor"],
         gain_min=config["gain_min"],
         gain_max=config["gain_max"],
     )
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=config["lr_scheduler_step_size"],
+        gamma=config["lr_scheduler_gamma"],
+    )
 
     checkpoint = output_dir / f"seed_{seed}_best.pt"
-    best_dev_acc = -float("inf")
+    best_dev_key = None
     epoch_train_acc = []
     for epoch in range(config["epochs"]):
         train_acc = train_epoch(
@@ -159,20 +189,35 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
             config["max_tokens"],
             device,
         )
-        dev_acc = evaluate_accuracy(
+        dev_logits = collect_logits(
             model, loaders["dev"], tokenizer, config["max_tokens"], device
         )
-        if dev_acc > best_dev_acc:
-            best_dev_acc = dev_acc
-            torch.save(model.state_dict(), checkpoint)
+        dev_acc, fusion_weight = select_fusion_weight(
+            *dev_logits, config["fusion_grid_points"]
+        )
+        dev_key = (dev_acc, -(epoch + 1))
+        if best_dev_key is None or dev_key > best_dev_key:
+            best_dev_key = dev_key
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "fusion_weight": fusion_weight,
+                },
+                checkpoint,
+            )
 
         epoch_result = {"epoch": epoch + 1, "train_acc": train_acc}
         epoch_train_acc.append(epoch_result)
         print(json.dumps({"seed": seed, **epoch_result}, sort_keys=True))
+        scheduler.step()
 
-    model.load_state_dict(torch.load(checkpoint, map_location=device))
-    test_acc = evaluate_accuracy(
+    selected = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(selected["model"])
+    test_logits = collect_logits(
         model, loaders["test"], tokenizer, config["max_tokens"], device
+    )
+    test_acc = fused_accuracy(
+        *test_logits, selected["fusion_weight"]
     )
     result = {
         "seed": seed,
@@ -203,10 +248,14 @@ def main():
         for seed in config["seeds"]
     ]
     test_acc = np.array([result["test_acc"] for result in results])
+    test_acc_std = float(test_acc.std(ddof=1))
     summary = {
         "seeds": config["seeds"],
         "test_acc_mean": float(test_acc.mean()),
-        "test_acc_std": float(test_acc.std(ddof=1)),
+        "test_acc_std": test_acc_std,
+        "test_acc_ci95": float(
+            1.96 * test_acc_std / np.sqrt(len(test_acc))
+        ),
         "per_seed": results,
     }
     (output_dir / "summary.json").write_text(
