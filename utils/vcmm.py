@@ -1,4 +1,4 @@
-"""Variance-Calibrated Modal Momentum exactly as defined in the manuscript."""
+"""VCMM dynamics estimation and Adam with time-varying modal momentum."""
 
 import math
 
@@ -20,7 +20,17 @@ def _sigmoid(value):
 
 
 class VCMMController:
-    """Online R/Q estimation and centered modality-specific momentum."""
+    """Online R/Q estimation and centered momentum for any number of modalities.
+
+    Probes are gradients of each modal classifier's own cross-entropy, used as
+    surrogates for modal dynamics. Parameter updates still use the gradient of
+    the fused training loss. Probes do not add an auxiliary training objective.
+
+    The first observation initializes R directly and Q/R to (1-beta0)^2/beta0.
+    During the configurable warm-up (100 steps by default), statistics evolve
+    while all modalities retain beta0. Adaptive control starts after warm-up
+    and after two observations are available.
+    """
 
     def __init__(
         self,
@@ -48,6 +58,7 @@ class VCMMController:
     @staticmethod
     @torch.no_grad()
     def _probe_gradient(logits, features, labels, indices):
+        """Analytic gradient of modal CE; detached from the fused-loss graph."""
         logits = logits.detach().float()[indices]
         features = features.detach().float()[indices]
         labels = labels.detach()[indices]
@@ -72,7 +83,10 @@ class VCMMController:
         grad_first = self._probe_gradient(logits, features, labels, first)
         grad_second = self._probe_gradient(logits, features, labels, second)
         grad_full = self._probe_gradient(logits, features, labels, full)
-        r_instant = 0.25 * torch.mean((grad_first - grad_second).square()).item()
+        # For equal halves this is exactly the manuscript's factor 1/4.
+        # n_A*n_B/n^2 also gives the full-batch noise scale for odd batches.
+        noise_scale = first.numel() * second.numel() / float(batch_size**2)
+        r_instant = noise_scale * torch.mean((grad_first - grad_second).square()).item()
         signal_energy = torch.mean(grad_full.square()).item()
         return grad_full, max(r_instant, self.epsilon), signal_energy
 
@@ -110,11 +124,40 @@ class VCMMController:
 
     @torch.no_grad()
     def update(self, image_logits, image_features, text_logits, text_features, labels):
+        """Backward-compatible wrapper for the original image/text interface."""
+        return self.update_modalities(
+            {
+                "image": (image_logits, image_features),
+                "text": (text_logits, text_features),
+            },
+            labels,
+        )
+
+    @torch.no_grad()
+    def update_modalities(self, modalities, labels):
+        """Return beta by name from {name: (logits [N,C], features [N,D])}.
+
+        Names must remain fixed across steps and match optimizer group labels.
+        For example, a trimodal caller can provide rgb, flow, and depth.
+        """
+        if len(modalities) < 2:
+            raise ValueError("VCMM requires at least two modalities")
+        if self.state and set(modalities) != set(self.state):
+            raise ValueError("Modality names must remain fixed across steps")
+        if labels.ndim != 1 or labels.shape[0] < 2:
+            raise ValueError("VCMM requires one label per sample and at least two samples")
+        for name, (logits, features) in modalities.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("Modality names must be nonempty strings")
+            if (
+                logits.ndim != 2 or features.ndim != 2
+                or logits.shape[0] != labels.shape[0]
+                or features.shape[0] != labels.shape[0]
+            ):
+                raise ValueError("Each modality must provide [N,C] logits and [N,D] features")
+
         initialized = True
-        for modality, logits, features in (
-            ("image", image_logits, image_features),
-            ("text", text_logits, text_features),
-        ):
+        for modality, (logits, features) in modalities.items():
             probe, r_instant, signal = self._measure(logits, features, labels)
             initialized &= self._update_statistics(
                 modality, probe, r_instant, signal
@@ -125,18 +168,18 @@ class VCMMController:
         # Statistics are collected during warm-up, but parameter updates retain
         # the base momentum until the controller has a stable history.
         if not initialized or self.steps <= self.warmup_steps:
-            return {"image": self.base_beta, "text": self.base_beta}
+            return {modality: self.base_beta for modality in modalities}
 
         raw_logits = {}
-        for modality in ("image", "text"):
+        for modality in modalities:
             state = self.state[modality]
             ratio = state["q"] / max(state["r"], self.epsilon)
             raw_logits[modality] = _logit(self._kalman_gain(ratio))
 
-        center = 0.5 * (raw_logits["image"] + raw_logits["text"])
+        center = sum(raw_logits.values()) / len(raw_logits)
         base_logit = _logit(self.base_gain)
         betas = {}
-        for modality in ("image", "text"):
+        for modality in modalities:
             centered = base_logit + self.adaptation_strength * (
                 raw_logits[modality] - center
             )

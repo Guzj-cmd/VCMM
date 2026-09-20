@@ -8,6 +8,8 @@ from torch import nn
 from torchvision.models import ResNet50_Weights, resnet50
 from transformers import BertModel
 
+from utils.evaluation import fuse_logits
+
 
 class MultimodalModel(nn.Module):
     """The two modal branches and their linear classifiers.
@@ -42,8 +44,3 @@ class MultimodalModel(nn.Module):
         ).last_hidden_state[:, 0]
         text_logits = self.text_classifier(text_features)
         return image_logits, text_logits, image_features, text_features
-
-
-def fuse_logits(image_logits, text_logits):
-    """Fixed equal logit fusion used identically for training and evaluation."""
-    return 0.5 * (image_logits + text_logits)

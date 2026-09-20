@@ -10,10 +10,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
 
-from dataset.image_text_dataset import build_splits
-from model.multimodal_model import MultimodalModel, fuse_logits
+from utils.evaluation import classification_metrics, fuse_logits, summarize_metrics
 from utils.vcmm import VCMMAdam, VCMMController
 
 
@@ -87,8 +85,12 @@ def train_epoch(model, loader, tokenizer, optimizer, controller, max_tokens, dev
         image_logits, text_logits, image_features, text_features = model(
             images, text_inputs
         )
-        modal_betas = controller.update(
-            image_logits, image_features, text_logits, text_features, labels
+        modal_betas = controller.update_modalities(
+            {
+                "image": (image_logits, image_features),
+                "text": (text_logits, text_features),
+            },
+            labels,
         )
         optimizer.set_modal_betas(modal_betas)
         fused_logits = fuse_logits(image_logits, text_logits)
@@ -120,27 +122,13 @@ def collect_logits(model, loader, tokenizer, max_tokens, device):
     )
 
 
-def fused_accuracy(image_logits, text_logits, targets, image_weight):
-    logits = image_weight * image_logits + (1.0 - image_weight) * text_logits
-    return float((logits.argmax(dim=1) == targets).float().mean())
-
-
-def select_fusion_weight(image_logits, text_logits, targets, points):
-    if points < 2:
-        raise ValueError("fusion_grid_points must be at least 2")
-    best = None
-    for index in range(points):
-        image_weight = index / float(points - 1)
-        accuracy = fused_accuracy(
-            image_logits, text_logits, targets, image_weight
-        )
-        key = (accuracy, -abs(image_weight - 0.5), -index)
-        if best is None or key > best[0]:
-            best = (key, image_weight)
-    return best[0][0], best[1]
+def fused_metrics(image_logits, text_logits, targets):
+    return classification_metrics(fuse_logits(image_logits, text_logits), targets)
 
 
 def run_seed(seed, config, args, datasets, tokenizer, output_dir):
+    from model.multimodal_model import MultimodalModel
+
     set_seed(seed)
     device = torch.device(args.device)
     loaders = {
@@ -192,21 +180,29 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
         dev_logits = collect_logits(
             model, loaders["dev"], tokenizer, config["max_tokens"], device
         )
-        dev_acc, fusion_weight = select_fusion_weight(
-            *dev_logits, config["fusion_grid_points"]
-        )
-        dev_key = (dev_acc, -(epoch + 1))
+        dev_metrics = fused_metrics(*dev_logits)
+        # Select by validation accuracy only; break ties with the earliest epoch.
+        dev_key = (dev_metrics["acc"], -(epoch + 1))
         if best_dev_key is None or dev_key > best_dev_key:
             best_dev_key = dev_key
             torch.save(
                 {
                     "model": model.state_dict(),
-                    "fusion_weight": fusion_weight,
+                    "fusion": "equal_logits",
+                    "epoch": epoch + 1,
+                    "dev_metrics": dev_metrics,
+                    "seed": seed,
+                    "config": config,
                 },
                 checkpoint,
             )
 
-        epoch_result = {"epoch": epoch + 1, "train_acc": train_acc}
+        epoch_result = {
+            "epoch": epoch + 1,
+            "train_acc": train_acc,
+            "dev_acc": dev_metrics["acc"],
+            "dev_macro_f1": dev_metrics["macro_f1"],
+        }
         epoch_train_acc.append(epoch_result)
         print(json.dumps({"seed": seed, **epoch_result}, sort_keys=True))
         scheduler.step()
@@ -216,22 +212,31 @@ def run_seed(seed, config, args, datasets, tokenizer, output_dir):
     test_logits = collect_logits(
         model, loaders["test"], tokenizer, config["max_tokens"], device
     )
-    test_acc = fused_accuracy(
-        *test_logits, selected["fusion_weight"]
-    )
+    test_metrics = fused_metrics(*test_logits)
     result = {
         "seed": seed,
-        "test_acc": test_acc,
+        "test_acc": test_metrics["acc"],
+        "test_macro_f1": test_metrics["macro_f1"],
+        "best_epoch": selected["epoch"],
+        "best_dev_metrics": selected["dev_metrics"],
+        "fusion": "equal_logits",
         "epoch_train_acc": epoch_train_acc,
     }
     (output_dir / f"seed_{seed}.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
-    print(json.dumps({"seed": seed, "test_acc": test_acc}, sort_keys=True))
+    print(json.dumps(
+        {"seed": seed, "test_acc": result["test_acc"],
+         "test_macro_f1": result["test_macro_f1"]},
+        sort_keys=True,
+    ))
     return result
 
 
 def main():
+    from transformers import AutoTokenizer
+    from dataset.image_text_dataset import build_splits
+
     args = arguments()
     config_path = Path(args.config)
     if not config_path.is_absolute():
@@ -247,15 +252,15 @@ def main():
         run_seed(seed, config, args, datasets, tokenizer, output_dir)
         for seed in config["seeds"]
     ]
-    test_acc = np.array([result["test_acc"] for result in results])
-    test_acc_std = float(test_acc.std(ddof=1))
     summary = {
         "seeds": config["seeds"],
-        "test_acc_mean": float(test_acc.mean()),
-        "test_acc_std": test_acc_std,
-        "test_acc_ci95": float(
-            1.96 * test_acc_std / np.sqrt(len(test_acc))
-        ),
+        "config": config,
+        "evaluation_protocol": {
+            "fusion": "fixed equal logit fusion on train, dev, and test",
+            "checkpoint_selection": "highest dev accuracy; earliest epoch on ties",
+            "macro_f1": "unweighted mean over all output classes; zero for undefined F1",
+        },
+        **summarize_metrics(results),
         "per_seed": results,
     }
     (output_dir / "summary.json").write_text(
